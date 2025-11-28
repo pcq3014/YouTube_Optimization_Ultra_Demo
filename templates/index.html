@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tối Ưu Video YouTube</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Tối Ưu Video YouTube</h1>
+            <p>Dự đoán hiệu suất video dựa trên tiêu đề và thumbnail trước khi đăng tải</p>
+        </div>
+        
+        <div class="content">
+            <div class="info-box">
+                <h3>Cách sử dụng</h3>
+                <p>Nhập thông tin video của bạn để nhận phân tích chi tiết về tiềm năng thu hút người xem. Bạn có thể nhập:</p>
+                <ul>
+                    <li>URL YouTube đầy đủ: youtube.com/watch?v=VIDEO_ID</li>
+                    <li>URL rút gọn: youtu.be/VIDEO_ID</li>
+                    <li>Chỉ Video ID: VIDEO_ID (11 ký tự)</li>
+                </ul>
+            </div>
+            
+            <form id="optimizerForm">
+                <div class="form-group">
+                    <label for="title">Tiêu đề video</label>
+                    <textarea 
+                        id="title" 
+                        name="title" 
+                        placeholder="Nhập tiêu đề video bạn dự định sử dụng..."
+                        required
+                    ></textarea>
+                    <div class="help-text">Tiêu đề nên rõ ràng, hấp dẫn và mô tả chính xác nội dung video</div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="video_url">URL hoặc ID video YouTube</label>
+                    <input 
+                        type="text" 
+                        id="video_url" 
+                        name="video_url" 
+                        placeholder="Ví dụ: O6tdnuHKgSQ hoặc youtube.com/watch?v=O6tdnuHKgSQ"
+                    >
+                    <div class="help-text">Hệ thống sẽ tự động lấy thumbnail từ video (nếu video đã đăng)</div>
+                    
+                    <div class="upload-section">
+                        <h4>Hoặc tải lên thumbnail tùy chỉnh</h4>
+                        <p>Nếu video chưa đăng hoặc bạn muốn thử nghiệm với thumbnail khác</p>
+                        <div class="file-input-wrapper">
+                            <input type="file" id="thumbnail_file" accept="image/*">
+                            <label for="thumbnail_file" class="file-input-label">Chọn ảnh thumbnail</label>
+                        </div>
+                        <div class="file-name" id="fileName"></div>
+                    </div>
+                </div>
+                
+                <button type="submit" class="btn" id="submitBtn">
+                    Phân tích video
+                </button>
+            </form>
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Đang phân tích video của bạn, vui lòng đợi...</p>
+            </div>
+            
+            <div class="error" id="error"></div>
+            
+            <div class="results" id="results">
+                <div class="result-header">
+                    <h2>Kết quả phân tích</h2>
+                </div>
+                
+                <div class="score-card">
+                    <h3>Tiêu đề video của bạn</h3>
+                    <p id="displayTitle" class="display-title"></p>
+                </div>
+                
+                <div class="score-card">
+                    <h3>Điểm tiềm năng tổng thể</h3>
+                    <div class="score-display">
+                        <div class="score-value" id="scoreValue">0.00</div>
+                        <div class="prediction-class" id="predictionClass"></div>
+                    </div>
+                </div>
+                
+                <div class="score-card">
+                    <h3>Đánh giá chi tiết</h3>
+                    <div class="score-breakdown">
+                        <div class="breakdown-item">
+                            <h4>Tiêu đề</h4>
+                            <div class="breakdown-score" id="titleScore">--</div>
+                            <div class="breakdown-label" id="titleAssessment"></div>
+                        </div>
+                        <div class="breakdown-item">
+                            <h4>Thumbnail</h4>
+                            <div class="breakdown-score" id="thumbnailScore">--</div>
+                            <div class="breakdown-label" id="thumbnailAssessment"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="score-card" id="thumbnailCard">
+                    <h3>Thumbnail video</h3>
+                    <div id="thumbnailContainer">
+                        <img id="thumbnailPreview" class="thumbnail-preview" src="" alt="Thumbnail">
+                        <p id="thumbnailError" class="thumbnail-error" style="display: none;">
+                            Không thể tải thumbnail. Video có thể chưa được đăng tải hoặc thumbnail chưa sẵn sàng.
+                        </p>
+                    </div>
+                </div>
+                
+                <div class="score-card">
+                    <h3>Chi tiết phân tích thumbnail</h3>
+                    <div class="analysis-grid" id="analysisGrid"></div>
+                </div>
+                
+                <div class="score-card">
+                    <h3>Đề xuất cải thiện</h3>
+                    <div class="recommendations-list" id="recommendationsList"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
