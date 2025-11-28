@@ -4,8 +4,15 @@ import joblib
 import pandas as pd
 from deepctr.models import FiBiNET
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
-from extract_title_feature import extract_raw_signals
+from extract_title_features import extract_raw_signals
 from title_embedding_for_predict import get_title_embedding
+import requests
+from PIL import Image
+import cv2 
+from io import BytesIO
+import numpy as np
+import random
+from tensorflow.python.keras.layers import LSTM
 # --- KHAI BÁO CẤU HÌNH ---
 EMBEDDING_DIM_TITLE = 768
 EMBEDDING_DIM_IMAGE = 512
@@ -21,54 +28,126 @@ IMAGE_EMBED_COLS = [f'dim_{i+1}' for i in range(EMBEDDING_DIM_IMAGE)]
 ALL_FEATURE_NAMES = SPARSE_FEATURES + DENSE_BASE_FEATURES + TITLE_EMBED_COLS + IMAGE_EMBED_COLS 
 
 # --- CÁC HÀM TRÍCH XUẤT FEATURE  ---
+def download_thumbnail(thumbnail_url):
+    """Tải thumbnail từ URL và trả về PIL Image (RGB) hoặc None."""
+    try:
+        resp = requests.get(thumbnail_url, timeout=10)
+        resp.raise_for_status()
+        return Image.open(BytesIO(resp.content)).convert("RGB")
+    except Exception:
+        return None
+
+def resize_and_normalize(image, size=(224, 224)):
+    """Resize ảnh và trả về (PIL_resized, numpy_normalized[0..1])."""
+    img_resized = image.resize(size, Image.Resampling.LANCZOS)
+    arr = np.asarray(img_resized).astype(np.float32)
+    return img_resized, arr / 255.0
+
+def _to_uint8(arr):
+    """Chuyển numpy array về uint8 an toàn (nhận biết nếu đang ở [0,1])."""
+    if arr.dtype == np.uint8:
+        return arr
+    if arr.max() <= 1.0:
+        return (arr * 255).astype(np.uint8)
+    return arr.astype(np.uint8)
+
+def _to_gray_uint8(arr):
+    """Trả về ảnh grayscale uint8 từ array RGB hoặc grayscale."""
+    u8 = _to_uint8(arr)
+    if u8.ndim == 3 and u8.shape[2] == 3:
+        return cv2.cvtColor(u8, cv2.COLOR_RGB2GRAY)
+    return u8
+
+def calculate_brightness(img_array):
+    """Độ sáng trung bình trên scale [0,1]."""
+    gray = _to_gray_uint8(img_array)
+    return float(np.mean(gray) / 255.0)
+
+def calculate_contrast(img_array):
+    """Độ tương phản (std) trên scale [0,1]."""
+    gray = _to_gray_uint8(img_array)
+    return float(np.std(gray) / 255.0)
+
+def detect_faces_on_original(img_pil):
+    """Đếm mặt bằng Haar Cascade; trả về 0 nếu không load được cascade."""
+    try:
+        arr = np.asarray(img_pil).astype(np.uint8)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY) if arr.ndim == 3 else arr
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        if cascade.empty():
+            return 0
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(50,50))
+        return int(len(faces))
+    except Exception:
+        return 0
 
 def extract_thumbnail_features(thumbnail_url):
-    """Giả lập trích xuất các feature từ thumbnail."""
-    # (Đây là nơi bạn chạy ResNet50, tính toán face_count, brightness, v.v.)
+    """
+    Trích xuất các feature cơ bản từ thumbnail:
+    brightness, contrast, attractiveness_score, face_count và 512-dim image embedding (fallback zeros).
+    """
+    EMBEDDING_DIM_IMAGE = 512
+
+    img = download_thumbnail(thumbnail_url)
+    if img is None:
+        base = {'brightness': 0.5, 'contrast': 0.5, 'attractiveness_score': 0.5, 'face_count': 0}
+        return {**base, **{f'dim_{i+1}': 0.0 for i in range(EMBEDDING_DIM_IMAGE)}}
+
+    face_count = detect_faces_on_original(img)
+    _, img_norm = resize_and_normalize(img)
+    brightness = calculate_brightness(img_norm)
+    contrast = calculate_contrast(img_norm)
+
+    # heuristic attractiveness (cân nhắc: thay bằng model thực nếu có)
+    attractiveness = 0.45 + 0.4 * brightness - 0.05 * contrast + 0.08 * min(face_count, 1)
+    attractiveness = float(np.clip(attractiveness + random.uniform(-0.03, 0.03), 0.0, 1.0))
+
+    image_embedding = np.zeros(EMBEDDING_DIM_IMAGE, dtype=float)
+
     return {
-        'brightness': random.uniform(0.5, 0.9),
-        'contrast': random.uniform(0.7, 0.95),
-        'attractiveness_score': random.uniform(0.8, 0.98),
-        'face_count': random.choice([0, 1, 2]),
+        'brightness': float(brightness),
+        'contrast': float(contrast),
+        'attractiveness_score': attractiveness,
+        'face_count': int(face_count),
+        **{f'dim_{i+1}': float(v) for i, v in enumerate(image_embedding)}
     }
 
 def extract_embeddings(title, thumbnail_url):
-
-    # Trích xuất vector cho title 
     title_vector = get_title_embedding(title)
-    # Chuyển vector 768 chiều thành dictionary (embed_1: value, embed_2: value, ...)
     title_embed_dict = {
-        name: title_vector[i] 
-        for i, name in enumerate(TITLE_EMBED_COLS)
+        f'embed_{i+1}': float(title_vector[i])
+        for i in range(EMBEDDING_DIM_TITLE)
     }
-    # --- 2. IMAGE EMBEDDING (TỪ FILE ĐÃ TIỀN XỬ LÝ) ---
+
+    # Image embedding
     try:
         import json, os
         from urllib.parse import urlparse
-
-        # load precomputed embeddings and names
+        
         embeddings_np = np.load('embeddings/thumbnail_embeddings.npy')
         with open('embeddings/image_names.json', 'r') as f:
             image_names = json.load(f)
 
-        # extract image stem from URL (last path segment, no ext)
         parsed = urlparse(thumbnail_url)
         img_stem = os.path.splitext(os.path.basename(parsed.path))[0]
 
         if img_stem in image_names:
             idx = image_names.index(img_stem)
             vec = embeddings_np[idx]
-            image_embeddict = {f'dim{i+1}': float(vec[i]) for i in range(len(vec))}
+            image_embed_dict = {
+                f'dim_{i+1}': float(vec[i]) for i in range(len(vec))
+            }
         else:
             image_embed_dict = {name: 0.0 for name in IMAGE_EMBED_COLS}
-    except Exception:
-        image_embed_dict = {name: np.random.randn() for name in IMAGE_EMBED_COLS}
 
-    return {title_embed_dict, image_embed_dict}
+    except Exception:
+        image_embed_dict = {name: 0.0 for name in IMAGE_EMBED_COLS}
+
+    return {**title_embed_dict, **image_embed_dict}
 
 # --- TẢI CÁC ĐỐI TƯỢNG ĐÃ LƯU ---
 try:
-    model = tf.keras.models.load_model('fibinet_ctr_model', custom_objects={'FiBiNET': FiBiNET})
+    model = tf.keras.models.load_model('fibinet_model_final', custom_objects={'FiBiNET': FiBiNET})
     mms = joblib.load('scaler_mms.pkl')
     mean_view_velocity = joblib.load('mean_view_velocity.pkl')
     
@@ -133,22 +212,30 @@ def predict_new_content(title_raw: str, thumbnail_url: str) -> dict:
     # A. Scaling (chỉ áp dụng cho các base feature)
     df_new[DENSE_BASE_FEATURES] = mms.transform(df_new[DENSE_BASE_FEATURES])
     
-    if le_dict.get('sentiment_category') is not None:
-        # lấy giá trị string rồi transform -> scalar
-        cat = df_new.at[0, 'sentiment_category']
-        df_new.at[0, 'sentiment_category'] = int(le_dict['sentiment_category'].transform([cat])[0])
-    else:
-        # fallback: map manual
-        mapping = {'negative': 0, 'neutral': 1, 'positive': 2}
-        df_new.at[0, 'sentiment_category'] = mapping.get(df_new.at[0, 'sentiment_category'], 1)
+    # sentiment_category hiện đang là string: 'positive', 'neutral', 'negative'
+    mapping = {'negative': 0, 'neutral': 1, 'positive': 2}
+
+    sent_text = df_new.at[0, 'sentiment_category']
+    df_new.at[0, 'sentiment_category'] = mapping.get(sent_text, 1)  # fallback = neutral
+
 
     # đảm bảo tất cả feature trong ALL_FEATURE_NAMES tồn tại (fill 0 nếu thiếu)
     for name in ALL_FEATURE_NAMES:
         if name not in df_new.columns:
             df_new[name] = 0.0
 
-    # tạo X_new dictionary với numpy arrays
-    X_new = {name: df_new[name].values for name in ALL_FEATURE_NAMES}
+    # tạo X_new dictionary với numpy arrays, ép dtype   
+    X_new = {}
+    for name in ALL_FEATURE_NAMES:
+        if name not in df_new.columns:
+            df_new[name] = 0.0  # fallback
+        arr = df_new[name].values
+        # Nếu feature là sparse -> int32, còn lại float32
+        if name in SPARSE_FEATURES:
+            X_new[name] = arr.astype(np.int32)
+        else:
+            X_new[name] = arr.astype(np.float32)
+
 
     # Dự đoán (robust lấy scalar)
     pred = model.predict(X_new)
@@ -162,12 +249,12 @@ def predict_new_content(title_raw: str, thumbnail_url: str) -> dict:
 
 # --- Demo chạy nếu file chạy trực tiếp ---
 if __name__ == "__main__":
-    new_title = "CÁCH TÔI kiếm $1000/tháng (KHÔNG CẦN VỐN) | Bài học kinh doanh mới"
-    new_thumbnail_url = "https://example.com/new_thumb_01.jpg"
+    new_title = "Người Nhanh Nhất Thế Giới Đối Đầu Robot"
+    new_thumbnail_url = "image.png"
     print("\n--- BẮT ĐẦU PHÂN TÍCH DỮ LIỆU MỚI ---")
     result = predict_new_content(new_title, new_thumbnail_url)
     print(f"\nTiêu đề: {result['title']}")
-    print(f"Điểm tối ưu hóa (Xác suất Top Tier): {result['optimization_score']:.4f}")
+    print(f"Điểm xác suất CTR click vào dựa trên Thumbnail và Tiêu đề  : {result['optimization_score']:.4f}")
     print(f"Phân loại: {result['prediction_class']}")
     if result['prediction_class'] == 'CAO TIỀM NĂNG':
         print("🎉 Kết quả: Tiêu đề và Thumbnail này có tiềm năng CTR cao.")
