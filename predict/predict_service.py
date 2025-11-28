@@ -13,6 +13,8 @@ from io import BytesIO
 import numpy as np
 import random
 from tensorflow.python.keras.layers import LSTM
+import os
+from pathlib import Path
 # --- KHAI BÁO CẤU HÌNH ---
 EMBEDDING_DIM_TITLE = 768
 EMBEDDING_DIM_IMAGE = 512
@@ -84,32 +86,33 @@ def detect_faces_on_original(img_pil):
 def extract_thumbnail_features(thumbnail_url):
     """
     Trích xuất các feature cơ bản từ thumbnail:
-    brightness, contrast, attractiveness_score, face_count và 512-dim image embedding (fallback zeros).
+    brightness, contrast, attractiveness_score, face_count
+    (KHÔNG bao gồm image embedding - sẽ tính riêng trong extract_embeddings)
     """
-    EMBEDDING_DIM_IMAGE = 512
-
     img = download_thumbnail(thumbnail_url)
     if img is None:
-        base = {'brightness': 0.5, 'contrast': 0.5, 'attractiveness_score': 0.5, 'face_count': 0}
-        return {**base, **{f'dim_{i+1}': 0.0 for i in range(EMBEDDING_DIM_IMAGE)}}
+        return {
+            'brightness': 0.5, 
+            'contrast': 0.5, 
+            'attractiveness_score': 0.5, 
+            'face_count': 0
+        }
 
     face_count = detect_faces_on_original(img)
     _, img_norm = resize_and_normalize(img)
     brightness = calculate_brightness(img_norm)
     contrast = calculate_contrast(img_norm)
 
-    # heuristic attractiveness (cân nhắc: thay bằng model thực nếu có)
+    # heuristic attractiveness
     attractiveness = 0.45 + 0.4 * brightness - 0.05 * contrast + 0.08 * min(face_count, 1)
     attractiveness = float(np.clip(attractiveness + random.uniform(-0.03, 0.03), 0.0, 1.0))
 
-    image_embedding = np.zeros(EMBEDDING_DIM_IMAGE, dtype=float)
-
+    # QUAN TRỌNG: Không trả về image embedding ở đây
     return {
         'brightness': float(brightness),
         'contrast': float(contrast),
         'attractiveness_score': attractiveness,
-        'face_count': int(face_count),
-        **{f'dim_{i+1}': float(v) for i, v in enumerate(image_embedding)}
+        'face_count': int(face_count)
     }
 
 def extract_embeddings(title, thumbnail_url):
@@ -119,42 +122,65 @@ def extract_embeddings(title, thumbnail_url):
         for i in range(EMBEDDING_DIM_TITLE)
     }
 
-    # Image embedding
+    # Image embedding - LUÔN TÍNH ON-THE-FLY
     try:
-        import json, os
-        from urllib.parse import urlparse
+        print(f"🔄 Đang tính toán image embedding cho: {thumbnail_url}")
+        img = download_thumbnail(thumbnail_url)
+        if img is None:
+            raise RuntimeError("Không thể tải thumbnail")
+
+        # Khởi tạo model (cache lần đầu)
+        if not hasattr(extract_embeddings, "_image_encoder"):
+            print("📦 Đang tải MobileNetV2 model...")
+            base = tf.keras.applications.MobileNetV2(
+                weights='imagenet', 
+                include_top=False, 
+                pooling='avg', 
+                input_shape=(224,224,3)
+            )
+            extract_embeddings._image_encoder = base
+            extract_embeddings._preprocess = tf.keras.applications.mobilenet_v2.preprocess_input
+            print("✅ Model đã sẵn sàng")
+
+        # Preprocess và extract embedding
+        _, arr = resize_and_normalize(img, size=(224,224))
+        inp = (arr * 255.0).astype(np.float32)
+        inp = extract_embeddings._preprocess(inp)
+        inp = np.expand_dims(inp, axis=0)
         
-        embeddings_np = np.load('embeddings/thumbnail_embeddings.npy')
-        with open('embeddings/image_names.json', 'r') as f:
-            image_names = json.load(f)
-
-        parsed = urlparse(thumbnail_url)
-        img_stem = os.path.splitext(os.path.basename(parsed.path))[0]
-
-        if img_stem in image_names:
-            idx = image_names.index(img_stem)
-            vec = embeddings_np[idx]
-            image_embed_dict = {
-                f'dim_{i+1}': float(vec[i]) for i in range(len(vec))
-            }
+        vec = extract_embeddings._image_encoder.predict(inp, verbose=0)
+        vec = np.asarray(vec).ravel()
+        
+        # Đảm bảo đúng kích thước (truncate hoặc pad)
+        if vec.shape[0] >= EMBEDDING_DIM_IMAGE:
+            vec = vec[:EMBEDDING_DIM_IMAGE]
         else:
-            image_embed_dict = {name: 0.0 for name in IMAGE_EMBED_COLS}
-
-    except Exception:
+            vec = np.concatenate([vec, np.zeros(EMBEDDING_DIM_IMAGE - vec.shape[0], dtype=vec.dtype)])
+        
+        print(f"✅ Image embedding: norm={np.linalg.norm(vec):.4f}")
+        image_embed_dict = {f'dim_{i+1}': float(vec[i]) for i in range(EMBEDDING_DIM_IMAGE)}
+        
+    except Exception as ex:
+        print(f"⚠️ Lỗi khi tính image embedding: {ex}")
+        print("📌 Sử dụng zero vector thay thế")
         image_embed_dict = {name: 0.0 for name in IMAGE_EMBED_COLS}
 
     return {**title_embed_dict, **image_embed_dict}
 
 # --- TẢI CÁC ĐỐI TƯỢNG ĐÃ LƯU ---
 try:
-    model = tf.keras.models.load_model('fibinet_model_final', custom_objects={'FiBiNET': FiBiNET})
-    mms = joblib.load('scaler_mms.pkl')
-    mean_view_velocity = joblib.load('mean_view_velocity.pkl')
+    base_dir = Path(__file__).resolve().parent
+    model = tf.keras.models.load_model(
+        str(base_dir / 'fibinet_model_final'),
+        custom_objects={'FiBiNET': FiBiNET}
+    )
+    mms = joblib.load(str(base_dir / 'scaler_mms.pkl'))
+    mean_view_velocity = joblib.load(str(base_dir / 'mean_view_velocity.pkl'))
     
     # Tải tất cả LabelEncoder và lưu vào dictionary
     le_dict = {}
     for feat in SPARSE_FEATURES:
-        le_dict[feat] = joblib.load(f'le_{feat}.pkl')
+        le_dict[feat] = joblib.load(str(base_dir / f'le_{feat}.pkl'))
     
     print("✅ Đã tải thành công model và các đối tượng tiền xử lý.")
 except Exception as e:
@@ -250,7 +276,7 @@ def predict_new_content(title_raw: str, thumbnail_url: str) -> dict:
 # --- Demo chạy nếu file chạy trực tiếp ---
 if __name__ == "__main__":
     new_title = "Người Nhanh Nhất Thế Giới Đối Đầu Robot"
-    new_thumbnail_url = "image.png"
+    new_thumbnail_url = "https://i.ytimg.com/vi/O6tdnuHKgSQ/maxresdefault.jpg"
     print("\n--- BẮT ĐẦU PHÂN TÍCH DỮ LIỆU MỚI ---")
     result = predict_new_content(new_title, new_thumbnail_url)
     print(f"\nTiêu đề: {result['title']}")
